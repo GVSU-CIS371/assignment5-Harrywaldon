@@ -1,151 +1,185 @@
 import { defineStore } from "pinia";
 import {
-  BaseBeverageType,
-  CreamerType,
-  SyrupType,
-  BeverageType,
-} from "../types/beverage";
-import tempretures from "../data/tempretures.json";
-import bases from "../data/bases.json";
-import syrups from "../data/syrups.json";
-import creamers from "../data/creamers.json";
-import db from "../firebase.ts";
-import {
-  collection,
-  getDocs,
-  setDoc,
-  doc,
-  QuerySnapshot,
-  QueryDocumentSnapshot,
   onSnapshot,
+  collection,
+  doc,
+  setDoc,
   query,
   where,
   Unsubscribe,
 } from "firebase/firestore";
-import type { User } from "firebase/auth";
+import { User } from "firebase/auth";
+import { db } from "../firebase";
+
+export interface BeverageType {
+  id: string;
+  name: string;
+  config: {
+    temp: string;
+    baseId: string;
+    creamerId: string;
+    syrupId: string;
+  };
+  userId: string;
+}
 
 export const useBeverageStore = defineStore("BeverageStore", {
   state: () => ({
-    temps: tempretures,
-    currentTemp: tempretures[0],
-    bases: [] as BaseBeverageType[],
-    currentBase: null as BaseBeverageType | null,
-    syrups: [] as SyrupType[],
-    currentSyrup: null as SyrupType | null,
-    creamers: [] as CreamerType[],
-    currentCreamer: null as CreamerType | null,
+    // Auth
+    user: null as User | null,
+
+    // Firestore listener cancel function
+    _bevUnsub: null as Unsubscribe | null,
+
+    // Beverage data
     beverages: [] as BeverageType[],
     currentBeverage: null as BeverageType | null,
+
+    // Options
+    temps: ["Cold", "Hot"],
+    currentTemp: "Cold",
+
+    bases: [] as any[],
+    currentBase: null as any,
+
+    creamers: [] as any[],
+    currentCreamer: null as any,
+
+    syrups: [] as any[],
+    currentSyrup: null as any,
+
+    // UI naming buffer
     currentName: "",
-    user: null as User | null,
-    snapshotUnsubscribe: null as Unsubscribe | null,
   }),
 
   actions: {
-    init() {
-      const baseCollection = collection(db, "bases");
-      getDocs(baseCollection)
-        .then((qs: QuerySnapshot) => {
-          if (qs.empty) {
-            bases.forEach((b) => {
-              const base = doc(db, `bases/${b.id}`);
-              setDoc(base, { name: b.name, color: b.color })
-                .then(() => {
-                  console.log(`New base with ID ${b.id} inserted`);
-                })
-                .catch((error: any) => {
-                  console.error("Error adding document: ", error);
-                });
-            });
-            this.bases = bases;
-          } else {
-            this.bases = qs.docs.map((qd: QueryDocumentSnapshot) => ({
-              id: qd.id,
-              name: qd.data().name,
-              color: qd.data().color,
-            })) as BaseBeverageType[];
-          }
-          this.currentBase = this.bases[0];
-          console.log("getting bases: ", this.bases);
-        })
-        .catch((error: any) => {
-          console.error("Error getting documents:", error);
-        });
-      const syrupCollection = collection(db, "syrups");
-      getDocs(syrupCollection)
-        .then((qs: QuerySnapshot) => {
-          if (qs.empty) {
-            syrups.forEach((b) => {
-              const syrup = doc(db, `syrups/${b.id}`);
-              setDoc(syrup, { name: b.name, color: b.color })
-                .then(() => {
-                  console.log(`New syrup with ID ${b.id} inserted`);
-                })
-                .catch((error: any) => {
-                  console.error("Error adding document: ", error);
-                });
-            });
-            this.syrups = syrups;
-          } else {
-            this.syrups = qs.docs.map((qd: QueryDocumentSnapshot) => ({
-              id: qd.id,
-              name: qd.data().name,
-              color: qd.data().color,
-            })) as SyrupType[];
-            console.log("getting syrups: ", this.syrups);
-          }
-          this.currentSyrup = this.syrups[0];
-        })
-        .catch((error: any) => {
-          console.error("Error getting syrups:", error);
-        });
+    async init() {
+      const loadCollection = async (name: string) => {
+        const snap = await import("firebase/firestore").then(({ getDocs }) =>
+          getDocs(collection(db, name))
+        );
+        return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      };
 
-      const creamerCollection = collection(db, "creamers");
-      getDocs(creamerCollection)
-        .then((qs: QuerySnapshot) => {
-          if (qs.empty) {
-            creamers.forEach((b) => {
-              const creamer = doc(db, `creamers/${b.id}`);
-              setDoc(creamer, { name: b.name, color: b.color })
-                .then(() => {
-                  console.log(`New creamer with ID ${b.id} inserted`);
-                })
-                .catch((error: any) => {
-                  console.error("Error adding document: ", error);
-                });
-            });
-            this.creamers = creamers;
-          } else {
-            this.creamers = qs.docs.map((qd: QueryDocumentSnapshot) => ({
-              id: qd.id,
-              name: qd.data().name,
-              color: qd.data().color,
-            })) as CreamerType[];
+      this.bases = await loadCollection("bases");
+      this.creamers = await loadCollection("creamers");
+      this.syrups = await loadCollection("syrups");
 
-            console.log("getting creamers: ", this.creamers);
-          }
-          this.currentCreamer = this.creamers[0];
-        })
-        .catch((error: any) => {
-          console.error("Error getting creamers:", error);
-        });
+      this.currentBase = this.bases[0] || null;
+      this.currentCreamer = this.creamers[0] || null;
+      this.currentSyrup = this.syrups[0] || null;
     },
 
+    /**
+     * ----------------------------
+     *   AUTH + LISTENER CONTROL
+     * ----------------------------
+     */
+    setUser(user: User | null) {
+      // Stop previous listener if any
+      if (this._bevUnsub) {
+        this._bevUnsub();
+        this._bevUnsub = null;
+      }
+
+      this.user = user;
+
+      // Not logged in → clear beverages
+      if (!user) {
+        this.beverages = [];
+        this.currentBeverage = null;
+        return;
+      }
+
+      // Logged in → start Firestore listener
+      const q = query(
+        collection(db, "beverages"),
+        where("userId", "==", user.uid)
+      );
+
+      this._bevUnsub = onSnapshot(q, (snap) => {
+        this.beverages = snap.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+        })) as BeverageType[];
+
+        // Maintain currentBeverage selection
+        if (
+          this.currentBeverage &&
+          this.beverages.some((b) => b.id === this.currentBeverage!.id)
+        ) {
+          this.currentBeverage = this.beverages.find(
+            (b) => b.id === this.currentBeverage!.id
+          )!;
+        } else {
+          this.currentBeverage = null;
+        }
+      });
+    },
+
+    /**
+     * ----------------------------
+     *   MAKE BEVERAGE
+     * ----------------------------
+     */
+    async makeBeverage(): Promise<string> {
+      if (!this.user) return "No user logged in, please sign in first.";
+
+      if (
+        !this.currentTemp ||
+        !this.currentBase ||
+        !this.currentCreamer ||
+        !this.currentSyrup ||
+        !this.currentName.trim()
+      ) {
+        return "Please complete all beverage options and the name before making a beverage.";
+      }
+
+      const id = `${this.user.uid}_${this.currentName.replace(/\s+/g, "_")}`;
+
+      const beverage: BeverageType = {
+        id,
+        name: this.currentName.trim(),
+        userId: this.user.uid,
+        config: {
+          temp: this.currentTemp,
+          baseId: this.currentBase.id,
+          creamerId: this.currentCreamer.id,
+          syrupId: this.currentSyrup.id,
+        },
+      };
+
+      // Optimistic UI update
+      const existing = this.beverages.findIndex((b) => b.id === id);
+      if (existing >= 0) {
+        this.beverages[existing] = beverage;
+      } else {
+        this.beverages.push(beverage);
+      }
+
+      await setDoc(doc(db, "beverages", id), beverage);
+
+      this.currentBeverage = beverage;
+
+      return `Beverage "${beverage.name}" made successfully!`;
+    },
+
+    /**
+     * ----------------------------
+     *   SHOW BEVERAGE IN UI
+     * ----------------------------
+     */
     showBeverage() {
       if (!this.currentBeverage) return;
-      this.currentName = this.currentBeverage.name;
-      this.currentTemp = this.currentBeverage.temp;
-      this.currentBase = this.currentBeverage.base;
-      this.currentSyrup = this.currentBeverage.syrup;
-      this.currentCreamer = this.currentBeverage.creamer;
-      console.log(
-        `currentBeverage changed`,
-        this.currentBase,
-        this.currentCreamer,
-        this.currentSyrup
-      );
+
+      const { temp, baseId, creamerId, syrupId } = this.currentBeverage.config;
+
+      this.currentTemp = temp;
+      this.currentBase = this.bases.find((b) => b.id === baseId) || null;
+      this.currentCreamer = this.creamers.find((c) => c.id === creamerId) || null;
+      this.currentSyrup = this.syrups.find((s) => s.id === syrupId) || null;
     },
-    makeBeverage() {},
-    setUser(user: User | null) {},
   },
+
+  persist: true,
 });
